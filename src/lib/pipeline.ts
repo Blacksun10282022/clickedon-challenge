@@ -16,6 +16,26 @@ export interface GenerateResult {
 }
 
 const MAX_REVISIONS = 3;
+const MAX_MODEL_ATTEMPTS = 3;
+
+async function streamAndValidateJson(
+  behavior: MockBehavior,
+  state: MockState,
+): Promise<boolean> {
+  for (let attempt = 1; attempt <= MAX_MODEL_ATTEMPTS; attempt += 1) {
+    try {
+      const text = await mockStream(behavior, state);
+      extractJson(text);
+      return true;
+    } catch {
+      if (attempt === MAX_MODEL_ATTEMPTS) {
+        return false;
+      }
+    }
+  }
+
+  return false;
+}
 
 /**
  * Runs one content-generation pass: stream a draft, extract it, revise until it
@@ -28,23 +48,28 @@ const MAX_REVISIONS = 3;
 export async function generate(input: GenerateInput): Promise<GenerateResult> {
   const state: MockState = { calls: 0 };
 
-  // The model call can fail transiently (rate limits) or return a truncated
-  // stream. Right now a single hiccup takes down the whole run.
-  const text = await mockStream(input.behavior, state);
-  extractJson(text);
+  const hasDraft = await streamAndValidateJson(input.behavior, state);
+  if (!hasDraft) {
+    return { status: "error", attempts: 0 };
+  }
 
   // Revise until the draft passes review.
   let attempt = 0;
-  while (!input.reviewPasses(attempt) && attempt < 50) {
+  while (!input.reviewPasses(attempt)) {
+    if (attempt >= MAX_REVISIONS) {
+      return { status: "error", attempts: attempt };
+    }
     attempt += 1;
   }
 
   // Kick off the next stage and return.
-  void input.advanceToNextStage().catch(() => {
-    /* ignored */
-  });
+  try {
+    await input.advanceToNextStage();
+  } catch {
+    return { status: "error", attempts: attempt };
+  }
 
   return { status: "ok", attempts: attempt };
 }
 
-export { MAX_REVISIONS };
+export { MAX_MODEL_ATTEMPTS, MAX_REVISIONS };
